@@ -2,7 +2,7 @@
 
 Built especially for people using Codex with ChatGPT Plus who worry about hitting their usage limits while vibe coding. See how much allowance you have left at a glance, without interrupting your coding flow or opening a chat to check.
 
-![Codex Usage Monitor showing 47% remaining in the macOS menu bar](assets/menu-bar-preview.png)
+![macOS menu bar showing Codex: 47% left, followed by the Codex icon and keyboard icon](assets/menu-bar-preview-adjusted.png)
 
 Open `Codex Usage Monitor.app` to show your remaining 5-hour allowance in the macOS menu bar. Click it for weekly allowance, reset times, the last successful update, manual refresh, and Quit.
 
