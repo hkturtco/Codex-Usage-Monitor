@@ -3,9 +3,22 @@
 <plist version="1.0">
 <dict>
 	<key>files</key>
-	<dict/>
+	<dict>
+		<key>Resources/MenuBarIcon.png</key>
+		<data>
+		MRy5FJ63qJF0fNYQniBQ1Odu4jc=
+		</data>
+	</dict>
 	<key>files2</key>
-	<dict/>
+	<dict>
+		<key>Resources/MenuBarIcon.png</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			6yJosNMEpiAA0GSJgq2VB3+rSGx1tsck1ZSOIhoavFc=
+			</data>
+		</dict>
+	</dict>
 	<key>rules</key>
 	<dict>
 		<key>^Resources/</key>

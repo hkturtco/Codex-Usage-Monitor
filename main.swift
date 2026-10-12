@@ -1,6 +1,6 @@
 import Cocoa
 
-final class UsageApp: NSObject, NSApplicationDelegate {
+final class UsageApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var item: NSStatusItem!
     var process: Process?
     var input: FileHandle?
@@ -8,18 +8,39 @@ final class UsageApp: NSObject, NSApplicationDelegate {
     var timer: Timer?
     var pending: Int?
     var nextID = 1
+    var initialized = false
+    var output: FileHandle?
     var lastUpdate: Date?
     let check = CommandLine.arguments.contains("--check")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "Codex: …"
+        item.button?.title = "…"
+        if let url = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png"),
+           let icon = NSImage(contentsOf: url) {
+            icon.size = NSSize(width: 16, height: 16)
+            icon.isTemplate = true
+            item.button?.image = icon
+            item.button?.imagePosition = .imageLeft
+        }
+        item.button?.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        item.button?.setAccessibilityLabel("Codex remaining usage")
         menu(nil)
+        if CommandLine.arguments.contains("--check-login") {
+            print("Start at Login status: \(CodexLoginStatus()); menu option present: \(item.menu?.item(withTag: 100) != nil)")
+            fflush(stdout)
+            NSApp.terminate(nil)
+            return
+        }
         connect()
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.refresh() }
+        let refreshTimer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in self?.refresh() }
+        RunLoop.main.add(refreshTimer, forMode: .common)
+        timer = refreshTimer
     }
 
     func connect() {
+        guard process == nil else { return }
+        initialized = false
         let candidates = [
             "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
             "/Applications/Codex.app/Contents/Resources/codex",
@@ -36,23 +57,35 @@ final class UsageApp: NSObject, NSApplicationDelegate {
         p.standardOutput = stdoutPipe
         p.standardError = FileHandle.nullDevice
         input = stdinPipe.fileHandleForWriting
+        output = stdoutPipe.fileHandleForReading
         buffer = Data()
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if data.isEmpty { handle.readabilityHandler = nil; return }
-            DispatchQueue.main.async { self?.receive(data) }
+            DispatchQueue.main.async {
+                guard self?.process === p else { return }
+                self?.receive(data)
+            }
         }
         p.terminationHandler = { [weak self] _ in
             DispatchQueue.main.async {
                 guard self?.process === p else { return }
                 self?.process = nil; self?.input = nil; self?.pending = nil
+                self?.initialized = false
+                self?.output?.readabilityHandler = nil
+                self?.output = nil
                 self?.fail("Connection unavailable; retrying each minute")
             }
         }
         do {
             try p.run(); process = p
             send(["id": 0, "method": "initialize", "params": ["clientInfo": ["name": "codex_usage_bar", "title": "Codex Usage Monitor", "version": "1.0.0"]]])
-        } catch { fail("Could not start Codex") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 25) { [weak self] in
+                guard let self = self, self.process === p, !self.initialized else { return }
+                self.fail("Connection timed out; choose Refresh now to retry")
+                self.disconnect()
+            }
+        } catch { disconnect(); fail("Could not start Codex") }
     }
 
     func send(_ message: [String: Any]) {
@@ -69,8 +102,9 @@ final class UsageApp: NSObject, NSApplicationDelegate {
             guard let message = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { continue }
             if let id = message["id"] as? Int {
                 if id == 0 {
-                    guard message["error"] == nil else { fail("Could not initialize Codex"); continue }
+                    guard message["error"] == nil else { fail("Could not initialize Codex"); disconnect(); continue }
                     send(["method": "initialized", "params": [:]])
+                    initialized = true
                     refresh()
                 } else if id == pending {
                     pending = nil
@@ -84,6 +118,7 @@ final class UsageApp: NSObject, NSApplicationDelegate {
 
     @objc func refresh() {
         guard process?.isRunning == true else { connect(); return }
+        guard initialized else { return }
         guard pending == nil else { return }
         let id = nextID; nextID += 1; pending = id
         send(["id": id, "method": "account/rateLimits/read"])
@@ -91,7 +126,7 @@ final class UsageApp: NSObject, NSApplicationDelegate {
             guard let self = self, self.pending == id else { return }
             self.pending = nil
             self.fail("Usage check timed out")
-            self.process?.terminate()
+            self.disconnect()
         }
     }
 
@@ -105,7 +140,12 @@ final class UsageApp: NSObject, NSApplicationDelegate {
         guard let limits = buckets?["codex"] ?? result["rateLimits"] as? [String: Any] else { fail("Usage unavailable"); return }
         let primary = limits["primary"] as? [String: Any]
         let secondary = limits["secondary"] as? [String: Any]
-        let text = "Codex: \(remaining(primary))"
+        var text = remaining(primary).replacingOccurrences(of: " left", with: "")
+        if let timestamp = primary?["resetsAt"] as? Double {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "HH:mm"
+            text += " ↻ \(formatter.string(from: Date(timeIntervalSince1970: timestamp)))"
+        }
         item.button?.title = text
         lastUpdate = Date()
         menu(limits)
@@ -113,7 +153,7 @@ final class UsageApp: NSObject, NSApplicationDelegate {
     }
 
     func fail(_ reason: String) {
-        item.button?.title = "Codex: —"
+        item.button?.title = "—"
         item.button?.toolTip = reason
         menu(nil, reason: reason)
         if check { print(reason); fflush(stdout); exit(1) }
@@ -121,6 +161,7 @@ final class UsageApp: NSObject, NSApplicationDelegate {
 
     func menu(_ limits: [String: Any]?, reason: String? = nil) {
         let menu = NSMenu()
+        menu.delegate = self
         func label(_ text: String) { let row = NSMenuItem(title: text, action: nil, keyEquivalent: ""); row.isEnabled = false; menu.addItem(row) }
         if let limits = limits {
             for (key, name) in [("primary", "5-hour allowance"), ("secondary", "Weekly allowance")] {
@@ -139,11 +180,69 @@ final class UsageApp: NSObject, NSApplicationDelegate {
         } else { label(reason ?? "Connecting to Codex…") }
         menu.addItem(.separator())
         let refreshItem = NSMenuItem(title: "Refresh now", action: #selector(refresh), keyEquivalent: "r"); refreshItem.target = self; menu.addItem(refreshItem)
+        let loginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleStartAtLogin), keyEquivalent: "")
+        loginItem.target = self
+        loginItem.tag = 100
+        menu.addItem(loginItem)
+        let settingsItem = NSMenuItem(title: "Approve in System Settings…", action: #selector(openLoginSettings), keyEquivalent: "")
+        settingsItem.target = self
+        settingsItem.tag = 101
+        menu.addItem(settingsItem)
+        updateLoginItems(menu)
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         item.menu = menu
     }
 
-    func applicationWillTerminate(_ notification: Notification) { timer?.invalidate(); process?.terminate() }
+    func menuNeedsUpdate(_ menu: NSMenu) { updateLoginItems(menu) }
+
+    func updateLoginItems(_ menu: NSMenu) {
+        guard let loginItem = menu.item(withTag: 100) else { return }
+        let status = CodexLoginStatus()
+        if status >= 0 {
+            loginItem.state = status == 1 ? .on : (status == 2 ? .mixed : .off)
+            loginItem.title = status == 2 ? "Start at Login (approval required)" : "Start at Login"
+            menu.item(withTag: 101)?.isHidden = status != 2
+        } else {
+            loginItem.isEnabled = false
+            loginItem.title = "Start at Login (requires macOS 13+)"
+            menu.item(withTag: 101)?.isHidden = true
+        }
+    }
+
+    @objc func toggleStartAtLogin() {
+        let status = CodexLoginStatus()
+        guard status >= 0 else { return }
+        let enable = status != 1 && status != 2
+        var error: NSError?
+        if !CodexSetLoginEnabled(enable, &error) {
+            let alert = NSAlert()
+            alert.messageText = "Could not change Start at Login"
+            alert.informativeText = error?.localizedDescription ?? "Please check Login Items in System Settings."
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        } else if enable && CodexLoginStatus() == 2 {
+            CodexOpenLoginSettings()
+        }
+        if let menu = item.menu { updateLoginItems(menu) }
+    }
+
+    @objc func openLoginSettings() {
+        CodexOpenLoginSettings()
+    }
+
+    func disconnect() {
+        let oldProcess = process
+        process = nil
+        initialized = false
+        pending = nil
+        output?.readabilityHandler = nil
+        output = nil
+        try? input?.close()
+        input = nil
+        if oldProcess?.isRunning == true { oldProcess?.terminate() }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) { timer?.invalidate(); disconnect() }
 }
 
 let app = NSApplication.shared
